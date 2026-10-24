@@ -39,10 +39,10 @@
                 <td>@member.ContactDetails</td>
                 <td>@member.MembershipType</td>
                 <td>@member.Status</td>
-                <td>
+                <td class="text-nowrap">
                     <a asp-action="Edit" asp-route-id="@member.MemberId" class="btn btn-sm btn-outline-primary">Edit</a>
                     <form asp-action="ToggleStatus" asp-route-id="@member.MemberId" method="post" class="d-inline">
-                        <button type="submit" class="btn btn-sm btn-outline-warning">@(member.Status == "active" ? "Deactivate" : "Activate")</button>
+                        <button type="submit" class="btn btn-sm @(member.Status == "active" ? "btn-outline-danger" : "btn-outline-success")">@(member.Status == "active" ? "Deactivate" : "Activate")</button>
                     </form>
                 </td>
             </tr>

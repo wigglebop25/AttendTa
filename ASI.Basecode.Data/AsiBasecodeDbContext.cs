@@ -67,6 +67,10 @@ namespace ASI.Basecode.Data
 
                 entity.HasIndex(e => e.StudentNumber, "UQ__members__0E749A79D636F2B5").IsUnique();
 
+                entity.HasIndex(e => e.UserId, "UX_members_user_id")
+                    .IsUnique()
+                    .HasFilter("[user_id] IS NOT NULL");
+
                 entity.Property(e => e.MemberId).ValueGeneratedOnAdd().HasColumnName("member_id");
                 entity.Property(e => e.ContactDetails).HasMaxLength(255).HasColumnName("contact_details");
                 entity.Property(e => e.CourseYear).IsRequired().HasMaxLength(255).HasColumnName("course_year");
