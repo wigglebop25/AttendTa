@@ -1,15 +1,17 @@
 using ASI.Basecode.Services.ServiceModels;
-using System.Collections.Generic;
+using System.Threading;
+using System.Threading.Tasks;
 
 namespace ASI.Basecode.Services.Interfaces
 {
     public interface IMemberService
     {
-        List<MemberViewModel> GetMembers(string search = null);
-        MemberViewModel GetMember(int id);
-        void AddMember(MemberViewModel model);
-        void UpdateMember(MemberViewModel model);
-        void ToggleStatus(int id);
-        void CreateMemberFromAccountRequest(string studentNumber, string fullName, string courseYear, string section);
+        Task<PagedResult<MemberViewModel>> GetPageAsync(string search, string status, int? pageNumber, CancellationToken cancellationToken = default);
+
+        /// <summary>Reads one member's editor model, or <c>null</c> when the member does not exist.</summary>
+        Task<MemberViewModel> GetMemberAsync(int id, CancellationToken cancellationToken = default);
+        Task<MemberViewModel> GetSelfProfileAsync(CancellationToken cancellationToken = default);
+        Task UpdateMemberAsync(MemberViewModel model, CancellationToken cancellationToken = default);
+        Task CreateMemberFromApprovedAccountRequestAsync(int userId, MemberViewModel model, CancellationToken cancellationToken = default);
     }
 }

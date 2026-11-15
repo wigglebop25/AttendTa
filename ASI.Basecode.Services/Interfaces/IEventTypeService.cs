@@ -1,13 +1,15 @@
 using ASI.Basecode.Services.ServiceModels;
-using System.Collections.Generic;
+using System.Threading;
+using System.Threading.Tasks;
 
 namespace ASI.Basecode.Services.Interfaces
 {
     public interface IEventTypeService
     {
-        List<EventTypeViewModel> GetEventTypes();
+        Task<PagedResult<EventTypeViewModel>> GetPageAsync(string status, int? page, CancellationToken cancellationToken = default);
         EventTypeViewModel GetEventType(int id);
-        void AddEventType(EventTypeViewModel model);
-        void UpdateEventType(EventTypeViewModel model);
+        Task AddEventTypeAsync(EventTypeViewModel model, CancellationToken cancellationToken = default);
+        Task UpdateEventTypeAsync(EventTypeViewModel model, CancellationToken cancellationToken = default);
+        Task ToggleActiveAsync(int id, CancellationToken cancellationToken = default);
     }
 }

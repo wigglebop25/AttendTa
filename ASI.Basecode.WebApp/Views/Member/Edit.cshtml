@@ -3,14 +3,23 @@
     ViewData["Title"] = "Edit Member";
 }
 
-<h2>Edit Member</h2>
-<hr />
+<div class="page-heading">
+    <h1>Edit Member</h1>
+</div>
 
-<form asp-action="Edit" method="post">
+<form asp-action="Edit" method="post" class="form-panel">
+    <div asp-validation-summary="ModelOnly" class="validation-summary" role="alert"></div>
     <input type="hidden" asp-for="MemberId" />
+    <div class="field">
+        <label asp-for="Email" class="field-label">Email</label>
+        <input asp-for="Email" class="field-control" readonly aria-readonly="true" aria-describedby="Email-help" />
+        <small id="Email-help" class="muted">The sign-in email belongs to the account and cannot be changed here.</small>
+    </div>
     <partial name="_Form" model="Model" />
-    <button type="submit" class="btn btn-primary">Save</button>
-    <a asp-action="Index" class="btn btn-secondary">Cancel</a>
+    <div class="form-actions">
+        <button type="submit" class="button button-primary">Save</button>
+        <a asp-action="Index" class="button button-secondary">Cancel</a>
+    </div>
 </form>
 
 @section Scripts {
