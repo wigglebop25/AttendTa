@@ -13,6 +13,7 @@ using ASI.Basecode.Services.ServiceModels;
 using ASI.Basecode.Services.Services;
 using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Playwright;
 using Xunit;
 
 namespace ASI.Basecode.IntegrationTests;
@@ -63,9 +64,13 @@ public sealed class AdminRoleAssignmentTests : IClassFixture<SqlServerDatabaseFi
         await SignInAsync(client, actor.Email, ct);
 
         var form = await client.GetStringAsync($"/admin/accounts/{target.Id}/role", ct);
-        Assert.Contains("Change Role", form, StringComparison.Ordinal);
+        Assert.Contains("Change role", form, StringComparison.Ordinal);
         Assert.Contains(target.Email, form, StringComparison.Ordinal);
-        Assert.Matches("<option[^>]*selected=\"selected\"[^>]*value=\"member\"|<option[^>]*value=\"member\"[^>]*selected=\"selected\"", form);
+        Assert.Contains(">Select a role</option>", form, StringComparison.Ordinal);
+        Assert.Contains("badge badge-member\">Member</span>", form, StringComparison.Ordinal);
+        Assert.DoesNotContain("value=\"member\"", form, StringComparison.Ordinal);
+        Assert.Contains("value=\"officer\"", form, StringComparison.Ordinal);
+        Assert.Contains("value=\"admin\"", form, StringComparison.Ordinal);
 
         var token = ExtractAntiforgeryToken(form);
         using var response = await client.PostAsync(
@@ -235,7 +240,7 @@ public sealed class AdminRoleAssignmentTests : IClassFixture<SqlServerDatabaseFi
             Assert.Equal(HttpStatusCode.OK, blank.StatusCode);
             var html = await blank.Content.ReadAsStringAsync(ct);
             Assert.Contains("A reason is required.", html, StringComparison.Ordinal);
-            Assert.Contains("Change Role", html, StringComparison.Ordinal);
+            Assert.Contains("Change role", html, StringComparison.Ordinal);
         }
 
         using (var overlong = await client.PostAsync($"/admin/accounts/{target.Id}/role", RoleForm("officer", new string('x', 1001), token), ct))
@@ -318,7 +323,7 @@ public sealed class AdminRoleAssignmentTests : IClassFixture<SqlServerDatabaseFi
     }
 
     [Fact]
-    public async Task NoOpRoleChangeSucceedsWithoutASecondAuditRow()
+    public async Task SameRoleSubmissionIsRejectedWithoutAnAuditRow()
     {
         var ct = TestContext.Current.CancellationToken;
         await ResetAdministratorsAsync(ct);
@@ -327,13 +332,61 @@ public sealed class AdminRoleAssignmentTests : IClassFixture<SqlServerDatabaseFi
 
         await using (var context = Context())
         {
-            await CreateService(context, new TestActor(actor.Id, RoleCodes.Admin)).ChangeRoleAsync(new ChangeAccountRoleViewModel
-            {
-                AccountId = target.Id,
-                RoleCode = RoleCodes.Officer,
-                Reason = "Already an officer."
-            }, ct);
+            var error = await Assert.ThrowsAsync<DomainException>(() =>
+                CreateService(context, new TestActor(actor.Id, RoleCodes.Admin)).ChangeRoleAsync(new ChangeAccountRoleViewModel
+                {
+                    AccountId = target.Id,
+                    RoleCode = RoleCodes.Officer,
+                    Reason = "Already an officer."
+                }, ct));
+            Assert.Equal(OutcomeCode.Invalid, error.Outcome);
+            Assert.Equal(nameof(ChangeAccountRoleViewModel.RoleCode), error.Field);
         }
+
+        await using var observer = Context();
+        var user = await observer.Users.AsNoTracking().SingleAsync(item => item.Id == target.Id, ct);
+        Assert.Equal(RoleCode.Officer, user.RoleId);
+        Assert.Null(user.UpdatedById);
+        Assert.False(await observer.ActivityLogs.AnyAsync(item => item.Action == AuditActions.UserRoleAssigned && item.EntityId == target.Id, ct));
+    }
+
+    [Fact]
+    public async Task StaleSameRolePostIsRefusedAndRetainsTheReason()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        await ResetAdministratorsAsync(ct);
+        var actor = await SeedUserAsync(RoleCode.Admin, "stale-actor", ct);
+        var target = await SeedUserAsync(RoleCode.Member, "stale-target", ct);
+
+        await SignInAsync(client, actor.Email, ct);
+        var token = ExtractAntiforgeryToken(await client.GetStringAsync($"/admin/accounts/{target.Id}/role", ct));
+
+        // The account becomes an Officer after the form loaded; the crafted submission still
+        // asks for Officer, which is now the current role.
+        await using (var context = Context())
+        {
+            await context.Users
+                .Where(user => user.Id == target.Id)
+                .ExecuteUpdateAsync(setters => setters.SetProperty(user => user.RoleId, RoleCode.Officer), ct);
+        }
+
+        using var response = await client.PostAsync(
+            $"/admin/accounts/{target.Id}/role",
+            RoleForm("officer", "Stale form submission.", token),
+            ct);
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var html = await response.Content.ReadAsStringAsync(ct);
+        Assert.Contains("This account already has that role. Choose a different role.", html, StringComparison.Ordinal);
+        Assert.Contains("Stale form submission.", html, StringComparison.Ordinal);
+        Assert.Contains(">Select a role</option>", html, StringComparison.Ordinal);
+        Assert.Contains("badge badge-officer\">Officer</span>", html, StringComparison.Ordinal);
+        Assert.DoesNotContain("value=\"officer\"", html, StringComparison.Ordinal);
+        Assert.Contains("value=\"member\"", html, StringComparison.Ordinal);
+        Assert.Contains("value=\"admin\"", html, StringComparison.Ordinal);
+        var roleSelect = Regex.Match(html, "<select[^>]*id=\"RoleCode\"[^>]*>.*?</select>", RegexOptions.Singleline).Value;
+        Assert.NotEmpty(roleSelect);
+        Assert.DoesNotContain("selected=\"selected\"", roleSelect, StringComparison.Ordinal);
 
         await using var observer = Context();
         var user = await observer.Users.AsNoTracking().SingleAsync(item => item.Id == target.Id, ct);
@@ -354,6 +407,108 @@ public sealed class AdminRoleAssignmentTests : IClassFixture<SqlServerDatabaseFi
             new ActivityLogWriter(context, actor, TimeProvider.System));
     }
 
+    [Fact]
+    public async Task RoleModalRetainsValidationAndSavesThroughTheExistingAuditedCommand()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        await ResetAdministratorsAsync(ct);
+        var actor = await SeedUserAsync(RoleCode.Admin, "modal-admin", ct);
+        var target = await SeedUserAsync(RoleCode.Member, "modal-target", ct);
+        await SignInAsync(client, actor.Email, ct);
+
+        async Task<HttpResponseMessage> ModalAsync(string path, HttpContent? content = null)
+        {
+            using var request = new HttpRequestMessage(content is null ? HttpMethod.Get : HttpMethod.Post, path) { Content = content };
+            request.Headers.Add("X-Record-Dialog", "true");
+            return await client.SendAsync(request, ct);
+        }
+
+        using var get = await ModalAsync($"/admin/accounts/{target.Id}/role");
+        Assert.Equal(HttpStatusCode.OK, get.StatusCode);
+        var form = await get.Content.ReadAsStringAsync(ct);
+        Assert.Contains("data-record-form", form);
+        Assert.Contains(target.Email, form);
+        Assert.DoesNotContain("<html", form, StringComparison.OrdinalIgnoreCase);
+        var token = ExtractAntiforgeryToken(form);
+
+        using var playwright = await Playwright.CreateAsync();
+        await using var browser = await playwright.Chromium.LaunchAsync(new() { Headless = true });
+        var page = await browser.NewPageAsync();
+        var posting = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var releasePost = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        await page.RouteAsync("**/*", async route =>
+        {
+            using var request = new HttpRequestMessage(new HttpMethod(route.Request.Method), route.Request.Url);
+            if (route.Request.Headers.TryGetValue("x-record-dialog", out var dialogHeader))
+                request.Headers.Add("X-Record-Dialog", dialogHeader);
+            if (route.Request.PostDataBuffer is byte[] body)
+            {
+                request.Content = new ByteArrayContent(body);
+                request.Content.Headers.TryAddWithoutValidation("Content-Type", route.Request.Headers["content-type"]);
+                posting.TrySetResult();
+                await releasePost.Task.WaitAsync(ct);
+            }
+            using var response = await client.SendAsync(request, ct);
+            var headers = response.Headers.Concat(response.Content.Headers)
+                .Where(header => header.Key is not ("Transfer-Encoding" or "Content-Length" or "Content-Encoding"))
+                .ToDictionary(header => header.Key, header => string.Join(", ", header.Value));
+            await route.FulfillAsync(new() { Status = (int)response.StatusCode, Headers = headers, BodyBytes = await response.Content.ReadAsByteArrayAsync(ct) });
+        });
+        var actorTrigger = page.Locator($"[data-record-open='change-role-{actor.Id}']");
+        foreach (var width in new[] { 1440, 390 })
+        {
+            await page.SetViewportSizeAsync(width, 900);
+            await page.GotoAsync($"http://localhost/admin/accounts?search={Uri.EscapeDataString(actor.Email)}&fit=2");
+            await actorTrigger.ClickAsync();
+            await page.Locator("#record-dialog #RoleCode").WaitForAsync();
+            Assert.True(await page.Locator("#record-dialog #RoleCode").EvaluateAsync<bool>("field => field === document.activeElement"));
+            Assert.True(await page.EvaluateAsync<bool>("document.documentElement.scrollWidth <= window.innerWidth"));
+            Assert.True(await page.Locator("#record-dialog").EvaluateAsync<bool>("dialog => dialog.scrollWidth <= dialog.clientWidth"));
+            await page.ScreenshotAsync(new() { Path = Path.Combine(Path.GetTempPath(), $"attendta-role-modal-{width}.png"), FullPage = true });
+            await page.Keyboard.PressAsync("Escape");
+            Assert.True(await actorTrigger.EvaluateAsync<bool>("link => link === document.activeElement"));
+        }
+        await actorTrigger.ClickAsync();
+        await page.Locator("#record-dialog #Reason").FillAsync("Retained during a failed save.");
+        await page.Locator("#record-dialog #RoleCode").SelectOptionAsync("member");
+        await page.Locator("#record-dialog button[type='submit']").ClickAsync();
+        try
+        {
+            await posting.Task.WaitAsync(TimeSpan.FromSeconds(10), ct);
+            Assert.True(await page.Locator("#record-dialog #RoleCode").IsDisabledAsync());
+            Assert.True(await page.Locator("#record-dialog #Reason").IsDisabledAsync());
+        }
+        finally { releasePost.TrySetResult(); }
+        await page.Locator("#record-dialog .validation-summary-errors").WaitForAsync();
+        Assert.False(await page.Locator("#record-dialog #Reason").IsDisabledAsync());
+        Assert.Equal("Retained during a failed save.", await page.Locator("#record-dialog #Reason").InputValueAsync());
+        await page.CloseAsync();
+
+        using var invalid = await ModalAsync($"/admin/accounts/{target.Id}/role", RoleForm("officer", "   ", token));
+        Assert.Equal(HttpStatusCode.OK, invalid.StatusCode);
+        var errors = await invalid.Content.ReadAsStringAsync(ct);
+        Assert.Contains("data-record-form", errors);
+        Assert.Contains("validation-summary-errors", errors);
+        Assert.Matches("<option[^>]*selected=\"selected\"[^>]*value=\"officer\"|<option[^>]*value=\"officer\"[^>]*selected=\"selected\"", errors);
+
+        using var protectedAdmin = await ModalAsync($"/admin/accounts/{actor.Id}/role", RoleForm("member", "Retain this reason.", token));
+        Assert.Equal(HttpStatusCode.OK, protectedAdmin.StatusCode);
+        var guard = await protectedAdmin.Content.ReadAsStringAsync(ct);
+        Assert.Contains("validation-summary-errors", guard);
+        Assert.Contains("Retain this reason.", guard);
+        Assert.Contains("data-record-form", guard);
+
+        using var saved = await ModalAsync($"/admin/accounts/{target.Id}/role", RoleForm("officer", " Approved officer role. ", token));
+        Assert.Equal(HttpStatusCode.OK, saved.StatusCode);
+        Assert.Equal("{\"saved\":true}", await saved.Content.ReadAsStringAsync(ct));
+        await using var observer = Context();
+        Assert.Equal(RoleCode.Officer, (await observer.Users.SingleAsync(user => user.Id == target.Id, ct)).RoleId);
+        Assert.Equal(RoleCode.Admin, (await observer.Users.SingleAsync(user => user.Id == actor.Id, ct)).RoleId);
+        var audit = await observer.ActivityLogs.SingleAsync(log => log.Action == AuditActions.UserRoleAssigned && log.EntityId == target.Id, ct);
+        Assert.Equal("Approved officer role.", audit.Reason);
+        Assert.Equal(actor.Id, audit.ActorUserId);
+    }
+
     private AsiBasecodeDBContext Context() =>
         new(new DbContextOptionsBuilder<AsiBasecodeDBContext>().UseSqlServer(fixture.ConnectionString).Options);
 
@@ -372,7 +527,7 @@ public sealed class AdminRoleAssignmentTests : IClassFixture<SqlServerDatabaseFi
         var email = $"{prefix}-{Guid.NewGuid():N}@attendta.test";
         var user = new User
         {
-            UserId = email,
+            Email = email,
             Name = $"Role {prefix}",
             Password = hasher.Hash(Password),
             RoleId = role,

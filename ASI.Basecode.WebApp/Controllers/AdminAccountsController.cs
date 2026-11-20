@@ -1,3 +1,4 @@
+using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Threading.Tasks;
@@ -28,6 +29,10 @@ namespace ASI.Basecode.WebApp.Controllers
         private readonly IAccountRoleService _accountRoleService;
         private readonly IAccessDialogService _accessDialogService;
         private readonly IAccountAccessCommands _accountAccessCommands;
+        // The role editor returns a partial for the dialog and a full page for direct navigation.
+        private bool IsRecordDialog => Request.Headers["X-Record-Dialog"] == "true";
+        private IActionResult RoleEditor(ChangeAccountRoleViewModel model) =>
+            IsRecordDialog ? PartialView("_RoleEditor", model) : View("ChangeRole", model);
 
         public AdminAccountsController(
             IHttpContextAccessor httpContextAccessor,
@@ -111,10 +116,11 @@ namespace ASI.Basecode.WebApp.Controllers
             {
                 var model = await _accountRoleService.GetRoleChangeAsync(id, HttpContext.RequestAborted);
                 ViewBag.Roles = ToSelectList(model.Roles);
-                return View(model);
+                return RoleEditor(model);
             }
             catch (DomainException exception)
             {
+                if (IsRecordDialog) return NotFound();
                 TempData["ErrorMessage"] = exception.Message;
                 return RedirectToAction(nameof(Index));
             }
@@ -129,22 +135,29 @@ namespace ASI.Basecode.WebApp.Controllers
 
             if (!ModelState.IsValid)
             {
-                return await PopulateRoleFormAsync(model) ? View(model) : RedirectToAction(nameof(Index));
+                return await PopulateRoleFormAsync(model) ? RoleEditor(model) : IsRecordDialog ? NotFound() : RedirectToAction(nameof(Index));
             }
 
             try
             {
                 await _accountRoleService.ChangeRoleAsync(model, HttpContext.RequestAborted);
                 TempData["SuccessMessage"] = "Role updated successfully.";
+                if (IsRecordDialog) return Json(new { saved = true });
                 return RedirectToAction(nameof(Index));
             }
             catch (DomainException exception)
             {
                 if (!await PopulateRoleFormAsync(model))
                 {
+                    if (IsRecordDialog) return NotFound();
                     return RedirectToAction(nameof(Index));
                 }
 
+                if (IsRecordDialog)
+                {
+                    ModelState.AddModelError(exception.Field ?? string.Empty, exception.Message);
+                    return RoleEditor(model);
+                }
                 return HandleDomainException(exception, model, nameof(Index));
             }
         }
@@ -163,6 +176,12 @@ namespace ASI.Basecode.WebApp.Controllers
                 model.CurrentRoleCode = current.CurrentRoleCode;
                 model.CurrentRoleLabel = current.CurrentRoleLabel;
                 model.Roles = current.Roles;
+                if (!current.Roles.Any(role => string.Equals(role.Code, model.RoleCode, StringComparison.Ordinal)))
+                {
+                    // The posted role is the account's role now (or no longer exists), so it is not
+                    // an offered alternative; the reason is still retained for the correction.
+                    model.RoleCode = null;
+                }
                 ViewBag.Roles = ToSelectList(current.Roles);
                 return true;
             }

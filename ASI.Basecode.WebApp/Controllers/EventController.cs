@@ -3,7 +3,8 @@ using ASI.Basecode.Resources;
 using ASI.Basecode.Resources.Constants;
 using ASI.Basecode.Services.Interfaces;
 using ASI.Basecode.Services.ServiceModels;
-using ASI.Basecode.WebApp.Formatting;
+using ASI.Basecode.Services.Formatting;
+using ASI.Basecode.WebApp.Models;
 using ASI.Basecode.WebApp.Mvc;
 using AutoMapper;
 using Microsoft.AspNetCore.Authorization;
@@ -34,8 +35,12 @@ namespace ASI.Basecode.WebApp.Controllers
 
         private bool IsRecordDialog => Request.Headers["X-Record-Dialog"] == "true";
 
-        private IActionResult Editor(EventViewModel model) =>
-            IsRecordDialog ? PartialView("_Editor", model) : View(model);
+        private IActionResult Editor(EventViewModel model)
+        {
+            ViewData["EventCreationToday"] = ManilaTimeFormatter.ToLocal(_timeProvider.GetUtcNow().UtcDateTime)
+                .ToString("yyyy-MM-dd'T'00:00", System.Globalization.CultureInfo.InvariantCulture);
+            return IsRecordDialog ? PartialView("_Editor", model) : View(model);
+        }
 
         public EventController(IHttpContextAccessor httpContextAccessor,
                                ILoggerFactory loggerFactory,
@@ -53,29 +58,90 @@ namespace ASI.Basecode.WebApp.Controllers
         [HttpGet]
         [Route("Event", Name = EventIndexRoute)]
         [Route("Event/Index")]
-        public async Task<IActionResult> Index(int? page, CancellationToken cancellationToken) =>
-            View(await _eventService.GetPageAsync(page, cancellationToken));
+        public async Task<IActionResult> Index(int? page, CancellationToken cancellationToken)
+        {
+            ViewData["EventTypeFilters"] = await _eventService.GetTypeFilterOptionsAsync(cancellationToken);
+            if (TempData["ListCancelId"] is int failedId)
+            {
+                ViewData["ListCancelId"] = failedId;
+                ViewData["ListCancelError"] = TempData["ListCancelError"];
+                ViewData["ListCancelReason"] = TempData["ListCancelReason"];
+                ViewData["ListCancelEvent"] = await _eventService.GetEventAsync(failedId, cancellationToken);
+            }
+            return View(await _eventService.GetPageAsync(page, cancellationToken));
+        }
 
         [HttpGet]
         [Route("Event/Details")]
         [Route("Event/{id:int}")]
-        public async Task<IActionResult> Details(int id, string status = "pending", int? page = null, CancellationToken cancellationToken = default)
+        public Task<IActionResult> Details(int id, string status = "pending", int? page = null, CancellationToken cancellationToken = default) =>
+            DossierAsync(id, status, page, cancellationToken);
+
+        /// <summary>
+        /// Approves the selected pending registrations of this event through the same use case the
+        /// review queue uses, then re-renders the dossier roster with one result row per participant.
+        /// The event id is the route-owned scope, so a posted id of another event is refused. The
+        /// parameter is named <c>id</c> so the POST query carries the dossier's own route key and
+        /// the pager and status tabs copy it forward unchanged.
+        /// </summary>
+        [HttpPost]
+        public async Task<IActionResult> ApproveSelected(int[] ids, int id, string status = "pending", int? page = null, CancellationToken cancellationToken = default)
         {
-            var item = await _eventService.GetEventAsync(id, cancellationToken);
-            if (item == null) return NotFound();
+            var selectedIds = ids ?? Array.Empty<int>();
+            if (selectedIds.Length == 0)
+            {
+                ViewBag.BulkError = BulkApproval.RegistrationEmptySelectionMessage;
+            }
+            else if (selectedIds.Length > BulkApproval.MaxBatchSize)
+            {
+                // The batch bound is a request-shape problem, so it is refused before the service
+                // is called; the service keeps the same guard for direct callers.
+                ViewBag.BulkError = BulkApproval.RegistrationOverBoundMessage;
+            }
+            else
+            {
+                try
+                {
+                    var outcomes = await _review.ApproveManyAsync(selectedIds, id, cancellationToken);
+                    ViewBag.BulkResult = RegistrationBulkResult.From(outcomes);
+                }
+                catch (DomainException exception)
+                {
+                    ViewBag.BulkError = exception.Message;
+                }
+            }
+
+            return await DossierAsync(id, status, page, cancellationToken);
+        }
+
+        private async Task<IActionResult> DossierAsync(int id, string status, int? page, CancellationToken cancellationToken)
+        {
             status = status?.ToLowerInvariant();
             if (status is not ("pending" or "confirmed" or "waitlisted" or "cancelled")) status = "pending";
             var roster = await _review.GetPageAsync(status, id, page, cancellationToken);
+            // Read the event after the roster so the dossier and its cancellation controls use
+            // the most recent event snapshot if the event changes while the roster is loading.
+            var item = await _eventService.GetEventAsync(id, cancellationToken);
+            if (item == null) return NotFound();
+            var now = _timeProvider.GetUtcNow().UtcDateTime;
+            foreach (var row in roster.Items)
+                row.CancellationUnavailableReason = RegistrationCancellationAvailability.Reason(item.EventStatusId, item.StartsAt, row.HasValidAttendance, now);
+            ViewData["PromotionCandidate"] = await _review.GetPromotionCandidateAsync(id, cancellationToken);
             async Task<int> Count(string value) => value == status ? roster.TotalCount :
-                (await _review.GetPageAsync(value, id, 1, cancellationToken)).TotalCount;
+                await _review.GetCountAsync(value, id, cancellationToken);
             var model = new EventDossierViewModel
             {
                 Event = item, Status = status, Roster = roster,
                 PendingCount = await Count("pending"), ConfirmedCount = await Count("confirmed"),
-                WaitlistedCount = await Count("waitlisted"),
-                HasStarted = item.StartsAt <= _timeProvider.GetUtcNow().UtcDateTime
+                WaitlistedCount = await Count("waitlisted"), CancelledCount = await Count("cancelled"),
+                HasStarted = item.StartsAt <= now
             };
-            return View(model);
+            // A POST re-render keeps every list link pointing at the GET dossier route. Both values
+            // must be a bare path: the pager and ListNavigation.Url append their own query string,
+            // so a path that already carried "?id=…" would become "?id=3?status=…".
+            ViewData["PagerPath"] = Url.Action(nameof(Details));
+            if (Request.Method == "POST") ViewData["ListPath"] = Url.Action(nameof(Details));
+            return View(nameof(Details), model);
         }
 
         private IActionResult StateReturn(int id, bool dossier, string returnUrl = null) =>
@@ -86,7 +152,18 @@ namespace ASI.Basecode.WebApp.Controllers
                     : RedirectToRoute(EventIndexRoute);
 
         [HttpGet]
-        public Task<IActionResult> Cover(int id, CancellationToken cancellationToken) => CoverViewAsync(id, cancellationToken);
+        public async Task<IActionResult> Cover(int id, CancellationToken cancellationToken)
+        {
+            try
+            {
+                var item = await _eventService.GetCoverManagementAsync(id, cancellationToken);
+                return item.CanUpload ? RedirectToAction(nameof(Edit), new { id }) : View("Cover", item);
+            }
+            catch (DomainException exception) when (exception.Outcome == OutcomeCode.NotFound)
+            {
+                return NotFound();
+            }
+        }
 
         [HttpPost]
         public async Task<IActionResult> UploadCover(int id, IFormFile cover, CancellationToken cancellationToken)
@@ -100,8 +177,7 @@ namespace ASI.Basecode.WebApp.Controllers
             }
             catch (InvalidDataException exception)
             {
-                ModelState.AddModelError("cover", exception.Message);
-                return await CoverViewAsync(id, cancellationToken);
+                return await RedirectCoverErrorAsync(id, exception.Message, cancellationToken);
             }
             catch (DomainException exception)
             {
@@ -129,17 +205,21 @@ namespace ASI.Basecode.WebApp.Controllers
             Editor(await WithOptionsAsync(new EventViewModel(), cancellationToken));
 
         [HttpPost]
-        public async Task<IActionResult> Create(EventViewModel model, CancellationToken cancellationToken)
+        public async Task<IActionResult> Create(EventViewModel model, IFormFile cover, CancellationToken cancellationToken)
         {
+            NormalizeEmptySelection(nameof(model.TypeId), "Select an event type.");
+            NormalizeEmptySelection(nameof(model.VenueId), "Select a venue.");
             if (!ModelState.IsValid)
             {
+                ViewData["CoverReselect"] = cover != null;
                 return Editor(await WithOptionsAsync(model, cancellationToken));
             }
 
             ToUtc(model);
             try
             {
-                await _eventService.CreateDraftAsync(model, cancellationToken);
+                await using var content = cover?.OpenReadStream();
+                await _eventService.CreateDraftWithCoverAsync(model, content, Path.GetExtension(cover?.FileName), cancellationToken);
                 TempData["SuccessMessage"] = "Draft event created.";
                 if (IsRecordDialog) return Json(new { saved = true });
                 return RedirectToRoute(EventIndexRoute);
@@ -147,7 +227,24 @@ namespace ASI.Basecode.WebApp.Controllers
             catch (DomainException ex)
             {
                 ToManila(model);
+                ViewData["CoverReselect"] = cover != null;
                 return await HandleAsync(ex, model, cancellationToken);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                ToManila(model);
+                ViewData["CoverReselect"] = cover != null;
+                ModelState.AddModelError("cover", ex is InvalidDataException ? ex.Message : "The save could not be confirmed. Check the events list before trying again to avoid a duplicate.");
+                return Editor(await WithOptionsAsync(model, cancellationToken));
+            }
+        }
+
+        private void NormalizeEmptySelection(string field, string message)
+        {
+            if (ModelState.TryGetValue(field, out var entry) && string.IsNullOrWhiteSpace(entry.AttemptedValue))
+            {
+                entry.Errors.Clear();
+                ModelState.AddModelError(field, message);
             }
         }
 
@@ -173,7 +270,7 @@ namespace ASI.Basecode.WebApp.Controllers
         }
 
         [HttpPost]
-        public async Task<IActionResult> Edit(EventViewModel model, CancellationToken cancellationToken)
+        public async Task<IActionResult> Edit(EventViewModel model, IFormFile cover, bool removeCover, CancellationToken cancellationToken)
         {
             var current = await _eventService.GetEventAsync(model.EventId, cancellationToken);
             if (current == null || current.EventStatusId is not (EventStatusCode.Draft or EventStatusCode.Published))
@@ -190,16 +287,20 @@ namespace ASI.Basecode.WebApp.Controllers
             model.EventStatusId = current.EventStatusId;
             model.TypeName = current.TypeName;
             model.VenueName = current.VenueName;
+            model.HasCover = current.HasCover;
             ModelState.Remove(nameof(model.EventStatusId));
             if (!ModelState.IsValid)
             {
+                ViewData["CoverReselect"] = cover != null;
+                RestorePublishedFields(model, current);
                 return Editor(await WithOptionsAsync(model, cancellationToken));
             }
 
             ToUtc(model);
             try
             {
-                await _eventService.UpdateDraftAsync(model, cancellationToken);
+                await using var content = cover?.OpenReadStream();
+                await _eventService.UpdateDraftWithCoverAsync(model, content, Path.GetExtension(cover?.FileName), removeCover, cancellationToken);
                 TempData["SuccessMessage"] = "Event updated.";
                 if (IsRecordDialog) return Json(new { saved = true });
                 return RedirectToRoute(EventIndexRoute);
@@ -207,8 +308,33 @@ namespace ASI.Basecode.WebApp.Controllers
             catch (DomainException ex)
             {
                 ToManila(model);
+                ViewData["CoverReselect"] = cover != null;
+                RestorePublishedFields(model, current);
                 return await HandleAsync(ex, model, cancellationToken);
             }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                ToManila(model);
+                ViewData["CoverReselect"] = cover != null;
+                RestorePublishedFields(model, current);
+                ModelState.AddModelError("cover", ex is InvalidDataException ? ex.Message : "The save could not be confirmed. Check the event before trying again.");
+                return Editor(await WithOptionsAsync(model, cancellationToken));
+            }
+        }
+
+        private void RestorePublishedFields(EventViewModel model, EventViewModel current)
+        {
+            model.HasCover = current.HasCover;
+            model.CoverVersion = current.CoverVersion;
+            ModelState.Remove(nameof(model.CoverVersion));
+            if (current.EventStatusId != EventStatusCode.Published) return;
+            model.TypeId = current.TypeId;
+            model.VenueId = current.VenueId;
+            model.StartsAt = ManilaTimeFormatter.ToLocal(current.StartsAt);
+            model.RegistrationDeadline = ManilaTimeFormatter.ToLocal(current.RegistrationDeadline);
+            model.ParticipantLimit = current.ParticipantLimit;
+            foreach (var field in new[] { nameof(model.TypeId), nameof(model.VenueId), nameof(model.StartsAt), nameof(model.RegistrationDeadline), nameof(model.ParticipantLimit) })
+                ModelState.Remove(field);
         }
 
         [HttpPost]
@@ -237,6 +363,27 @@ namespace ASI.Basecode.WebApp.Controllers
         {
             await TryRunAsync(ct => _eventService.CompleteAsync(id, ct), "Event completed.", cancellationToken);
             return StateReturn(id, dossier);
+        }
+
+        [HttpPost]
+        public async Task<IActionResult> CancelFromList(int id, string reason, string returnUrl, CancellationToken cancellationToken)
+        {
+            try
+            {
+                if (string.IsNullOrWhiteSpace(reason))
+                    throw new DomainException(OutcomeCode.Invalid, "A cancellation reason is required.");
+                if (reason.Length > 500)
+                    throw new DomainException(OutcomeCode.Invalid, "The reason cannot exceed 500 characters.");
+                await _eventService.CancelAsync(id, reason, cancellationToken);
+                TempData["SuccessMessage"] = "Event cancelled.";
+            }
+            catch (DomainException exception)
+            {
+                TempData["ListCancelId"] = id;
+                TempData["ListCancelError"] = exception.Message;
+                TempData["ListCancelReason"] = reason;
+            }
+            return StateReturn(id, false, returnUrl);
         }
 
         [HttpPost]
@@ -332,18 +479,6 @@ namespace ASI.Basecode.WebApp.Controllers
             return RedirectToRoute(EventIndexRoute);
         }
 
-        private async Task<IActionResult> CoverViewAsync(int id, CancellationToken cancellationToken)
-        {
-            try
-            {
-                return View("Cover", await _eventService.GetCoverManagementAsync(id, cancellationToken));
-            }
-            catch (DomainException exception) when (exception.Outcome == OutcomeCode.NotFound)
-            {
-                return NotFound();
-            }
-        }
-
         private async Task<IActionResult> HandleCoverErrorAsync(int id, DomainException exception, CancellationToken cancellationToken)
         {
             if (exception.Outcome == OutcomeCode.NotFound)
@@ -351,32 +486,27 @@ namespace ASI.Basecode.WebApp.Controllers
                 return NotFound();
             }
 
-            if (exception.Field != null)
-            {
-                ModelState.AddModelError(exception.Field, exception.Message);
-            }
-            else
-            {
-                TempData["ErrorMessage"] = exception.Message;
-            }
+            return await RedirectCoverErrorAsync(id, exception.Message, cancellationToken);
+        }
 
-            return await CoverViewAsync(id, cancellationToken);
+        private async Task<IActionResult> RedirectCoverErrorAsync(int id, string message, CancellationToken cancellationToken)
+        {
+            try
+            {
+                var item = await _eventService.GetCoverManagementAsync(id, cancellationToken);
+                TempData["ErrorMessage"] = message;
+                return RedirectToAction(item.CanUpload ? nameof(Edit) : nameof(Cover), new { id });
+            }
+            catch (DomainException exception) when (exception.Outcome == OutcomeCode.NotFound)
+            {
+                return NotFound();
+            }
         }
 
         private async Task<IActionResult> HandleAsync(DomainException exception, EventViewModel model, CancellationToken cancellationToken)
         {
-            if (IsRecordDialog)
-            {
-                ModelState.AddModelError(exception.Field ?? string.Empty, exception.Message);
-                return Editor(await WithOptionsAsync(model, cancellationToken));
-            }
-
-            if (exception.Field == null)
-            {
-                return HandleDomainException(exception, model, nameof(Index));
-            }
-
-            return HandleDomainException(exception, await WithOptionsAsync(model, cancellationToken));
+            ModelState.AddModelError(exception.Field ?? string.Empty, exception.Message);
+            return Editor(await WithOptionsAsync(model, cancellationToken));
         }
 
         // Form controls post Asia/Manila wall-clock values; SQL stores UTC.

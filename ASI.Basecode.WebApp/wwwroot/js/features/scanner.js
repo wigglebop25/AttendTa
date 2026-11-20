@@ -1,6 +1,6 @@
 // Door scanner shared behaviour. Loaded by the CheckIn view after the locally
-// served jsQR decoder. The camera and manual adapters use the small API this file exposes; the
-// pass-code form posts the same contract with form-encoded AJAX and renders the JSON outcome.
+// served jsQR decoder. The camera adapter uses the small API this file exposes to post scans
+// and render the JSON outcome.
 (function () {
     'use strict';
 
@@ -8,6 +8,8 @@
     if (!root) return;
 
     var result = root.querySelector('[data-scan-result]');
+    var redirectOutcome = root.querySelector('[data-redirect-outcome]');
+    if (redirectOutcome) redirectOutcome.focus();
     var modes = Array.prototype.slice.call(root.querySelectorAll('[data-scanner-mode]'));
 
     function panelFor(mode) {
@@ -47,7 +49,7 @@
         });
     });
 
-    // The panels render visible so the pass-code and manual lookup forms work without JavaScript.
+    // The panels render visible so manual lookup works without JavaScript.
     // With JavaScript the tabs take over and show only the selected mode.
     var initialMode = modes.filter(function (mode) {
         return mode.getAttribute('aria-selected') === 'true';
@@ -75,11 +77,11 @@
             day: '2-digit',
             hour: '2-digit',
             minute: '2-digit',
-            hour12: false
+            hour12: true
         }).formatToParts(date).forEach(function (part) {
             parts[part.type] = part.value;
         });
-        return parts.year + '-' + parts.month + '-' + parts.day + ' ' + parts.hour + ':' + parts.minute + ' Asia/Manila';
+        return parts.year + '-' + parts.month + '-' + parts.day + ' ' + parts.hour + ':' + parts.minute;
     }
 
     function render(outcome) {
@@ -87,6 +89,8 @@
         result.innerHTML = '';
 
         var box = document.createElement('div');
+        box.id = 'check-in-result';
+        box.setAttribute('tabindex', '-1');
         box.className = 'scanner-outcome scanner-outcome-' + (outcome.outcome || 'invalid');
         box.setAttribute('role', outcome.outcome === 'success' || outcome.outcome === 'repeat' ? 'status' : 'alert');
 
@@ -124,9 +128,10 @@
         result.appendChild(box);
     }
 
-    function cell(text) {
+    function cell(text, label) {
         var td = document.createElement('td');
         td.textContent = text || '';
+        td.setAttribute('data-label', label);
         return td;
     }
 
@@ -142,34 +147,41 @@
 
         var row = document.createElement('tr');
         row.setAttribute('data-registration-id', outcome.registrationId);
-        row.appendChild(cell(outcome.memberName));
+        row.appendChild(cell(outcome.memberName, 'Participant'));
 
-        var student = cell(outcome.studentNumber);
-        student.className = 'numeric';
+        var student = cell(outcome.studentNumber, 'Student number');
+        student.className = 'numeric cell-identifier';
         row.appendChild(student);
 
-        var time = cell(formatTime(outcome.recordedAt));
-        time.className = 'numeric';
+        var time = cell(formatTime(outcome.recordedAt), 'Recorded');
+        time.className = 'numeric cell-date';
         row.appendChild(time);
 
         var outcomeCell = document.createElement('td');
+        outcomeCell.setAttribute('data-label', 'Outcome');
         var badge = document.createElement('span');
         badge.className = 'badge badge-open';
         badge.textContent = 'Recorded';
         outcomeCell.appendChild(badge);
         row.appendChild(outcomeCell);
 
+        row.appendChild(cell('—', 'Reason'));
+
         var action = document.createElement('td');
         action.className = 'actions';
+        action.setAttribute('data-label', 'Action');
+        var actions = document.createElement('div');
+        actions.className = 'row-actions';
         var button = document.createElement('button');
         button.type = 'button';
-        button.className = 'button button-small button-secondary';
+        button.className = 'button button-quiet-danger';
         button.setAttribute('data-dialog-open', 'invalidate-dialog');
         button.setAttribute('data-dialog-value-id', String(outcome.registrationId));
         button.setAttribute('data-dialog-value-summary',
             'Invalidate the check-in for ' + outcome.memberName + ' (' + outcome.studentNumber + ')?');
         button.textContent = 'Invalidate';
-        action.appendChild(button);
+        actions.appendChild(button);
+        action.appendChild(actions);
         row.appendChild(action);
 
         body.prepend(row);
@@ -218,29 +230,6 @@
                 render(outcome);
                 return outcome;
             });
-    }
-
-    var scanForm = root.querySelector('[data-scan-form]');
-    if (scanForm) {
-        scanForm.addEventListener('submit', function (event) {
-            event.preventDefault();
-            var input = scanForm.querySelector('input[name="token"]');
-            var value = input && input.value.trim();
-            if (!value) {
-                if (input) input.focus();
-                return;
-            }
-
-            var button = scanForm.querySelector('button[type="submit"]');
-            if (button) button.disabled = true;
-            postScan(scanForm, value).then(function () {
-                if (button) button.disabled = false;
-                if (input) {
-                    input.value = '';
-                    input.focus();
-                }
-            });
-        });
     }
 
     window.AttendTaScanner = {

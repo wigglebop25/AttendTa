@@ -60,7 +60,7 @@ else
             <h2 id="event-description-heading">About this event</h2>
             @if (!string.IsNullOrWhiteSpace(Model.Description))
             {
-                <p class="event-description">@Model.Description</p>
+                <div class="event-description"><partial name="_DescriptionContent" model="Model.Description" /></div>
             }
             else
             {
@@ -122,6 +122,10 @@ else
             else if (!Model.IsSignupOpen)
             {
                 <p class="notice" role="status">Signup closed on @ManilaTimeFormatter.Format(Model.RegistrationDeadline).</p>
+            }
+            else if (!Model.HasMemberProfile)
+            {
+                <p class="notice" role="status">A linked member profile is needed to register. Contact an administrator for help.</p>
             }
             else if (!Model.CanRegister)
             {

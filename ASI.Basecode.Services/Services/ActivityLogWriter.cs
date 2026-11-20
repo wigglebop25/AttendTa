@@ -14,6 +14,8 @@ using ASI.Basecode.Services.Interfaces;
 
 namespace ASI.Basecode.Services.Services;
 
+// Append adds an audit row to EF inside the caller's transaction; the caller saves it with the change.
+// Payloads must contain explicit field subsets and must not contain sensitive fields.
 public sealed class ActivityLogWriter(AsiBasecodeDBContext context, ICurrentActor actor, TimeProvider timeProvider) : IActivityLogWriter
 {
     public void Append(AuditEntry entry)
@@ -23,7 +25,7 @@ public sealed class ActivityLogWriter(AsiBasecodeDBContext context, ICurrentActo
         if (!actor.IsAuthenticated || actor.UserId <= 0) throw new InvalidOperationException("Audit requires an authenticated user.");
         var description = AuditDescriptions.ForAction(entry.Action);
         if ((entry.Action == AuditActions.AccountRequestApproved || entry.Action == AuditActions.AccountRequestRejected) && entry.EntityType != "account_requests") throw new ArgumentException("Unsupported audit entity type.");
-        if ((entry.Action == AuditActions.EventUpdated || entry.Action == AuditActions.EventPublished || entry.Action == AuditActions.EventCancelled || entry.Action == AuditActions.EventCompleted || entry.Action == AuditActions.EventCheckInOpened || entry.Action == AuditActions.EventCheckInClosed) && entry.EntityType != "events") throw new ArgumentException("Unsupported audit entity type.");
+        if ((entry.Action == AuditActions.EventCreated || entry.Action == AuditActions.EventUpdated || entry.Action == AuditActions.EventPublished || entry.Action == AuditActions.EventCancelled || entry.Action == AuditActions.EventCompleted || entry.Action == AuditActions.EventCheckInOpened || entry.Action == AuditActions.EventCheckInClosed) && entry.EntityType != "events") throw new ArgumentException("Unsupported audit entity type.");
         if (entry.Action == AuditActions.RegistrationCancelled && entry.EntityType != "registrations") throw new ArgumentException("Unsupported audit entity type.");
         if ((entry.Action == AuditActions.RegistrationApproved || entry.Action == AuditActions.RegistrationDeclined || entry.Action == AuditActions.RegistrationAdminCancelled) && entry.EntityType != "registrations") throw new ArgumentException("Unsupported audit entity type.");
         if (entry.Action == AuditActions.RegistrationPromoted && entry.EntityType != "registrations") throw new ArgumentException("Unsupported audit entity type.");

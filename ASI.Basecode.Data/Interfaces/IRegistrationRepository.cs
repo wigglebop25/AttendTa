@@ -102,13 +102,22 @@ public interface IRegistrationRepository
     Task<bool> HasIssuedCertificateForEventAsync(int eventId, CancellationToken cancellationToken = default);
     Task<int> CountReviewQueueAsync(ASI.Basecode.Data.Models.Lookups.RegistrationStatusCode status, int? eventId, CancellationToken cancellationToken = default);
     Task<IReadOnlyList<RegistrationReviewRow>> GetReviewQueueAsync(ASI.Basecode.Data.Models.Lookups.RegistrationStatusCode status, int? eventId, int offset, int limit, CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Reads display identity for the given registrations in one query, with no status filter, so
+    /// a bulk approval can still name a record after it has left the pending page. Read only.
+    /// </summary>
+    Task<IReadOnlyList<RegistrationSummary>> GetSummariesAsync(IReadOnlyCollection<int> registrationIds, CancellationToken cancellationToken = default);
 }
 
 public sealed record UpcomingRegistrationRow(int RegistrationId, int EventId, string EventTitle, DateTime StartsAt);
 public sealed record MemberRegistrationRow(int RegistrationId, int MemberId, int EventId, ASI.Basecode.Data.Models.Lookups.RegistrationStatusCode Status);
 public sealed record RegistrationIdentity(int UserId, int MemberId, int EventId);
 public sealed record RegistrationPromotionCandidate(int RegistrationId, int UserId, int MemberId, int EventId, DateTime? ReviewedAt);
-public sealed record MyEventRegistrationRow(int RegistrationId, int EventId, string EventTitle, string TypeName, string VenueName, DateTime StartsAt, ASI.Basecode.Data.Models.Lookups.EventStatusCode EventStatusId, ASI.Basecode.Data.Models.Lookups.RegistrationStatusCode Status);
+public sealed record MyEventRegistrationRow(int RegistrationId, int EventId, string EventTitle, string TypeName, string VenueName, DateTime StartsAt, ASI.Basecode.Data.Models.Lookups.EventStatusCode EventStatusId, ASI.Basecode.Data.Models.Lookups.RegistrationStatusCode Status)
+{
+    public string DeclineReason { get; init; }
+}
 public sealed record MyPassRow(int RegistrationId, int EventId, string EventTitle, string EventTypeName, string VenueName, DateTime StartsAt, string HolderName, string StudentNumber, string QrToken);
 public sealed record OwnedPassRow(int RegistrationId, int EventId, ASI.Basecode.Data.Models.Lookups.RegistrationStatusCode Status, ASI.Basecode.Data.Models.Lookups.EventStatusCode EventStatus, string QrToken);
 /// <summary>
@@ -119,9 +128,21 @@ public sealed record OwnedPassRow(int RegistrationId, int EventId, ASI.Basecode.
 public sealed record ConfirmedLookupRow(int RegistrationId, string MemberName, string StudentNumber, bool HasAttendance, DateTime? InvalidatedAt);
 public sealed record RegistrationReviewRow(int RegistrationId, int EventId, string EventTitle, string MemberName, string StudentNumber, DateTime SubmittedAt, ASI.Basecode.Data.Models.Lookups.RegistrationStatusCode Status)
 {
+    public ASI.Basecode.Data.Models.Lookups.EventStatusCode EventStatus { get; init; }
+    public DateTime EventStartsAt { get; init; }
+    public bool HasValidAttendance { get; init; }
+    public string CancellationUnavailableReason { get; set; }
     /// <summary>The course captured at signup, used by the participation report breakdowns.</summary>
     public string Course { get; init; }
 
     /// <summary>The year level captured at signup, used by the participation report breakdowns.</summary>
     public int YearLevel { get; init; }
+    public string DeclineReason { get; init; }
 }
+
+/// <summary>
+/// Display-only identity for a registration that a bulk approval is about to decide. It carries no
+/// decision field and no status filter, so a record that has already left the pending page still
+/// resolves its own name for the result panel.
+/// </summary>
+public sealed record RegistrationSummary(int RegistrationId, int EventId, string EventTitle, string MemberName, string StudentNumber, DateTime SubmittedAt, ASI.Basecode.Data.Models.Lookups.RegistrationStatusCode Status);
